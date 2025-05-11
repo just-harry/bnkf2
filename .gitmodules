@@ -1,0 +1,3 @@
+[submodule "dependencies/zlib-ng"]
+	path = dependencies/zlib-ng
+	url = https://github.com/zlib-ng/zlib-ng.git
