@@ -1,0 +1,17 @@
+
+<!-- SPDX-LICENSE-IDENTIFIER: 0BSD -->
+
+<!--
+	Copyright Harry Gillanders 2025-2025.
+	Distributed under the Zero-Clause BSD licence.
+-->
+
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<TargetFrameworks>net46;net6.0</TargetFrameworks>
+		<LangVersion>12.0</LangVersion>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<Nullable>enable</Nullable>
+	</PropertyGroup>
+</Project>
+
