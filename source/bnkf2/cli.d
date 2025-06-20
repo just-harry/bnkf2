@@ -57,11 +57,24 @@ static immutable(OSChar[]) commandLineUsage = (
 	~ "                                   prevent BNKF2 from including a '.__bnkf2' metadata file in the zip file.\r\n"
 	~ "          | -n|-ignoreBNKF2Metadata: When converting a zip file to a BNK file, this switch will\r\n"
 	~ "                                     instruct BNKF2 to ignore any '.__bnkf2' metadata file in the zip file.\r\n"
+	~ "          | -nc|-ignoreCompressionMetadata:\r\n"
+	~ "                                     When converting a zip file to a BNK file, this switch will\r\n"
+	~ "                                     instruct BNKF2 to ignore the compression-status\r\n"
+	~ "                                     within any '.__bnkf2' metadata file in the zip file.\r\n"
+	~ "          | -nv|-ignoreVersionMetadata:\r\n"
+	~ "                                     When converting a zip file to a BNK file, this switch will\r\n"
+	~ "                                     instruct BNKF2 to ignore the BNK-version\r\n"
+	~ "                                     within any '.__bnkf2' metadata file in the zip file.\r\n"
 	~ "          | -m|-outputCompressedBNK: When converting a zip file to a BNK file, this switch will\r\n"
 	~ "                                     instruct BNKF2 to create a compressed BNK file.\r\n"
 	~ "                                     The compression-status stored within a '.__bnkf2' metadata file\r\n"
 	~ "                                     takes precedence over this switch\r\n"
-	~ "                                     unless the '-ignoreBNKF2Metadata' is also provided.\r\n"
+	~ "                                     unless '-ignoreBNKF2Metadata' or `-ignoreCompressionMetadata` is also provided.\r\n"
+	~ "          | -f|-outputBNKVersion:    When converting a zip file to a BNK file, this switch will\r\n"
+	~ "                                     cause BNKF2 to create a BNK file of the provided BNK file format version.\r\n"
+	~ "                                     The BNK-version stored within a '.__bnkf2' metadata file\r\n"
+	~ "                                     takes precedence over this switch\r\n"
+	~ "                                     unless '-ignoreBNKF2Metadata' or `-ignoreVersionMetadata` is also provided.\r\n"
 	~ "          | -f(t/d)(c/m)l|-file(Table/Data)(Compression/Memory)Level <level>:\r\n"
 	~ "                                     When converting a zip file to a BNK file,\r\n"
 	~ "                                     these switches control the aggressiveness of the compression\r\n"
@@ -185,9 +198,11 @@ struct InvocationDictates
 			fileDataMemoryLevel = 1 << 6,
 			emitDuplicateFiles = 1 << 7,
 			omitBNKF2Metadata = 1 << 8,
-			ignoreBNKF2Metadata = 1 << 9,
-			outputCompressedBNK = 1 << 10,
-			fileTableUncompressedChunkThreshold = 1 << 11
+			ignoreCompressionMetadata = 1 << 9,
+			ignoreVersionMetadata = 1 << 10,
+			outputCompressedBNK = 1 << 11,
+			outputBNKVersion = 1 << 12,
+			fileTableUncompressedChunkThreshold = 1 << 13
 		}
 
 		enum FileType : ubyte
@@ -210,6 +225,8 @@ struct InvocationDictates
 
 		InputFileType inputFileType;
 		OutputFileType outputFileType;
+
+		uint outputBNKVersion;
 
 		DEFLATECompressionLevel fileTableCompressionLevel;
 		ZLibMemoryLevel fileTableMemoryLevel;
@@ -422,11 +439,35 @@ handleFileConversionArgument:
 			break;
 		mixin(match!"n"); goto ignoreBNKF2Metadata;
 		mixin(match!"ignoreBNKF2Metadata"); ignoreBNKF2Metadata:
-			dictates.fileConversion.switches |= dictates.fileConversion.switches.ignoreBNKF2Metadata;
+			dictates.fileConversion.switches |= dictates.fileConversion.switches.ignoreCompressionMetadata;
+			dictates.fileConversion.switches |= dictates.fileConversion.switches.ignoreVersionMetadata;
+			break;
+		mixin(match!"nc"); goto ignoreCompressionMetadata;
+		mixin(match!"ignoreCompressionMetadata"); ignoreCompressionMetadata:
+			dictates.fileConversion.switches |= dictates.fileConversion.switches.ignoreCompressionMetadata;
+			break;
+		mixin(match!"nv"); goto ignoreVersionMetadata;
+		mixin(match!"ignoreVersionMetadata"); ignoreVersionMetadata:
+			dictates.fileConversion.switches |= dictates.fileConversion.switches.ignoreVersionMetadata;
 			break;
 		mixin(match!"m"); goto outputCompressedBNK;
 		mixin(match!"outputCompressedBNK"); outputCompressedBNK:
 			dictates.fileConversion.switches |= dictates.fileConversion.switches.outputCompressedBNK;
+			break;
+		mixin(match!"f"); goto outputBNKVersion;
+		mixin(match!"outputBNKVersion"); outputBNKVersion:
+			dictates.fileConversion.switches |= dictates.fileConversion.switches.outputBNKVersion;
+
+			if (arguments.length == 1) goto missingArgumentAfterSwitch;
+			mixin(advanceAndHash);
+
+			if ((*arg < '2') | (*arg > '3'))
+			{
+				goto invalidBNKVersion;
+			}
+
+			dictates.fileConversion.outputBNKVersion = *arg - '0';
+
 			break;
 		mixin(match!"ftcl"); goto fileTableCompressionLevel;
 		mixin(match!"fileTableCompressionLevel"); fileTableCompressionLevel:
@@ -561,6 +602,7 @@ missingPathAfterDoubleDash: e = "No path was supplied after a '--'.\r\n"; goto p
 overflowedUInt: e = "A number was too big for a 32-bit integer.\r\n"; goto printErrorMessage;
 unrecognisedFileType: e = "An unrecognised file-type was supplied. Only 'bnk' and 'zip' are supported.\r\n"; goto printErrorMessage;
 invalidZlibLevel: e = "An invalid zlib level was provided; the valid levels are 0-to-9.\r\n"; goto printErrorMessage;
+invalidBNKVersion: e = "An invalid BNK version was provided; the valid versions are 2 and 3.\r\n"; goto printErrorMessage;
 printErrorMessage:
 	e.writeToConsoleOrFile(io.stderr);
 	return 1;
@@ -826,10 +868,12 @@ int invokeFileConversionCommand (scope InvocationDictates.FileConversion* fileCo
 		state.progressObserver.context = *cast(void**) &io.stderr;
 		state.progressObserver.observer = (fileConversion.switches & S.quiet) ? null : &zipToBNKProgressReporter;
 
-		state.packedState |= (fileConversion.switches & S.ignoreBNKF2Metadata) ? state.packedState.Flags.ignoreBNKF2MetadataForCompressionSetting : 0;
+		state.packedState |= (fileConversion.switches & S.ignoreCompressionMetadata) ? state.packedState.Flags.ignoreBNKF2MetadataForCompressionSetting : 0;
+		state.packedState |= (fileConversion.switches & S.ignoreVersionMetadata) ? state.packedState.Flags.ignoreBNKF2MetadataForBNKVersion : 0;
+
 		state.packedState |= (fileConversion.switches & S.outputCompressedBNK) ? state.packedState.Flags.outputCompressedBNK : 0;
 
-		state.bnkVersion = 3;
+		state.bnkVersion = (fileConversion.switches & S.outputBNKVersion) ? fileConversion.outputBNKVersion : 3;
 
 		state.fileTableCompressionLevel = (fileConversion.switches & S.fileTableCompressionLevel) ? fileConversion.fileTableCompressionLevel : state.fileTableCompressionLevel.default_;
 		state.fileTableMemoryLevel = (fileConversion.switches & S.fileTableMemoryLevel) ? fileConversion.fileTableMemoryLevel : state.fileTableMemoryLevel.default_;
