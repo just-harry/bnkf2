@@ -72,7 +72,7 @@ static immutable(OSChar[]) commandLineUsage = (
 	~ "                                     specifies the maximum uncompressed size of an individual\r\n"
 	~ "                                     compressed chunk of the BNK's file-table.\r\n\r\n"
 	~ "    bnkf2 -c|-command <command-name> [...]\r\n"
-	~ "        | Inhibits the usual file conversion routine and instead causes BNKF2"
+	~ "        | Inhibits the usual file conversion routine and instead causes BNKF2\r\n"
 	~ "          to enact the command specified just after the switch.\r\n\r\n"
 	~ "        | Commands:\r\n"
 	~ "          | isCompressedBnk? [--] <input-file-path>\r\n"
