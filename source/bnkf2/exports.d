@@ -41,6 +41,11 @@ export BNKF2Status bnkf2_bnkToZip (
 		uint crc32;
 	}
 
+	if (state.version_ != 0)
+	{
+		return BNKF2Status.status(BNKF2StatusCode.unrecognisedStructureVersion);
+	}
+
 	state.extendedReturnChannel.v0.packedState = 0;
 
 	const(ubyte)* input = inputBuffer.ptr;
@@ -1156,6 +1161,11 @@ export BNKF2Status bnkf2_zipToBNK (
 	enum size_t compressionStateMemorySize = compressionBufferSize + compressionBufferOverflow + uncompressedChunkSizesBufferSize;
 
 	BNKF2Status ultimateStatus = void;
+
+	if (state.version_ != 0)
+	{
+		return BNKF2Status.status(BNKF2StatusCode.unrecognisedStructureVersion);
+	}
 
 	state.extendedReturnChannel.v0.packedState = 0;
 

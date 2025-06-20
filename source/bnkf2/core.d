@@ -403,6 +403,8 @@ struct BNKToZipState
 	ContextualisedProgressObserver progressObserver;
 
 	BNKToZipResult* extendedReturnChannel;
+
+	uint version_;
 }
 
 
@@ -549,6 +551,8 @@ struct ZipToBNKState
 
 	ZipToBNKResult* extendedReturnChannel;
 
+	uint version_;
+
 	DEFLATECompressionLevel fileTableCompressionLevel;
 	ZLibMemoryLevel fileTableMemoryLevel;
 	DEFLATECompressionLevel fileDataCompressionLevel;
@@ -622,45 +626,46 @@ struct BNKF2Status
 enum BNKF2StatusCode : uint
 {
 	success = 0,
-	memoryAllocationFailed = 1,
-	inputIsTooLong = 2,
-	inputIsTruncated = 3,
-	inputIsInvalid = 4,
-	fileTableUncompressedChunkThresholdIsTooBig = 5,
-	impossiblyLargeFileTableInBNK = 6,
-	impossiblyLongFilePathInBNK = 7,
-	outOfBoundsDataOffsetInBNK = 8,
-	outOfBoundsDataSpanInBNK = 9,
-	mismatchingCompressedChunkCountInBNK = 10,
-	invalidZLibHeaderForFileInBNK = 11,
-	presetDictionaryRequiredByFileInBNK = 12,
-	couldNotFindEndOfCentralDirectoryRecordInZip = 13,
-	invalidSignatureForEndOfCentralDirectoryLocator64InZip = 14,
-	invalidSignatureForEndOfCentralDirectoryRecord64InZip = 15,
-	invalidSignatureForCentralDirectoryRecordInZip = 16,
-	invalidSignatureForLocalFileHeaderInZip = 17,
-	invalidOffsetForCentralDirectoryInZip = 18,
-	invalidSizeForCentralDirectoryInZip = 19,
-	invalidOffsetForEndOfCentralDirectoryRecord64InZip = 20,
-	invalidSizeForEndOfCentralDirectoryRecord64InZip = 21,
-	invalidOffsetForCentralDirectoryRecordInZip = 22,
-	unsupportedVersionRequiredForExtractionInZip = 23,
-	unsupportedEncryptedFileInZip = 24,
-	unsupportedCompressedPatchedDataInZip = 25,
-	unsupportedEnhancedCompressionInZip = 26,
-	unsupportedCompressionMethodInZip = 27,
-	invalidFooterSizeForCentralDirectoryRecordInZip = 28,
-	invalidFooterSizeForLocalFileHeaderInZip = 29,
-	excessivelyLongFileNameForCentralDirectoryRecordInZip = 30,
-	tooMuchFileNameInZip = 31,
-	invalidExtraFieldLengthForCentralDirectoryRecordInZip = 32,
-	invalidExtraFieldSizeForCentralDirectoryRecordInZip = 33,
-	failedToFindExtendedInformationExtraField64ForCentralDirectoryRecordInZip = 34,
-	invalidOffsetForLocalFileHeaderInZip = 35,
-	invalidCompressedSizeForFileInZip = 36,
-	invalidUncompressedSizeForFileInZip = 37,
-	zipFileIsTooBigForBNKFile = 38,
-	invalidSizeForFileInZip = 39,
+	unrecognisedStructureVersion = 1,
+	memoryAllocationFailed = 2,
+	inputIsTooLong = 3,
+	inputIsTruncated = 4,
+	inputIsInvalid = 5,
+	fileTableUncompressedChunkThresholdIsTooBig = 6,
+	impossiblyLargeFileTableInBNK = 7,
+	impossiblyLongFilePathInBNK = 8,
+	outOfBoundsDataOffsetInBNK = 9,
+	outOfBoundsDataSpanInBNK = 10,
+	mismatchingCompressedChunkCountInBNK = 11,
+	invalidZLibHeaderForFileInBNK = 12,
+	presetDictionaryRequiredByFileInBNK = 13,
+	couldNotFindEndOfCentralDirectoryRecordInZip = 14,
+	invalidSignatureForEndOfCentralDirectoryLocator64InZip = 15,
+	invalidSignatureForEndOfCentralDirectoryRecord64InZip = 16,
+	invalidSignatureForCentralDirectoryRecordInZip = 17,
+	invalidSignatureForLocalFileHeaderInZip = 18,
+	invalidOffsetForCentralDirectoryInZip = 19,
+	invalidSizeForCentralDirectoryInZip = 20,
+	invalidOffsetForEndOfCentralDirectoryRecord64InZip = 21,
+	invalidSizeForEndOfCentralDirectoryRecord64InZip = 22,
+	invalidOffsetForCentralDirectoryRecordInZip = 23,
+	unsupportedVersionRequiredForExtractionInZip = 24,
+	unsupportedEncryptedFileInZip = 25,
+	unsupportedCompressedPatchedDataInZip = 26,
+	unsupportedEnhancedCompressionInZip = 27,
+	unsupportedCompressionMethodInZip = 28,
+	invalidFooterSizeForCentralDirectoryRecordInZip = 29,
+	invalidFooterSizeForLocalFileHeaderInZip = 30,
+	excessivelyLongFileNameForCentralDirectoryRecordInZip = 31,
+	tooMuchFileNameInZip = 32,
+	invalidExtraFieldLengthForCentralDirectoryRecordInZip = 33,
+	invalidExtraFieldSizeForCentralDirectoryRecordInZip = 34,
+	failedToFindExtendedInformationExtraField64ForCentralDirectoryRecordInZip = 35,
+	invalidOffsetForLocalFileHeaderInZip = 36,
+	invalidCompressedSizeForFileInZip = 37,
+	invalidUncompressedSizeForFileInZip = 38,
+	zipFileIsTooBigForBNKFile = 39,
+	invalidSizeForFileInZip = 40,
 }
 
 

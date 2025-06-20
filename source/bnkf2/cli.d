@@ -756,6 +756,8 @@ int invokeFileConversionCommand (scope InvocationDictates.FileConversion* fileCo
 		BNKToZipResult result;
 		BNKToZipState state;
 
+		state.version_ = 0;
+
 		state.memoryAllocators = &memoryAllocators;
 		state.zlib = &zlib;
 		state.extendedReturnChannel = &result;
@@ -815,6 +817,8 @@ int invokeFileConversionCommand (scope InvocationDictates.FileConversion* fileCo
 
 		ZipToBNKResult result;
 		ZipToBNKState state;
+
+		state.version_ = 0;
 
 		state.memoryAllocators = &memoryAllocators;
 		state.zlib = &zlib;
