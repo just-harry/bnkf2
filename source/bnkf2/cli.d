@@ -456,7 +456,7 @@ handleFileConversionArgument:
 			if (arguments.length == 1) goto missingArgumentAfterSwitch;
 			mixin(advanceAndHash);
 
-			if ((*arg < '0') & (*arg > '9'))
+			if ((*arg < '0') | (*arg > '9'))
 			{
 				goto invalidZlibLevel;
 			}
