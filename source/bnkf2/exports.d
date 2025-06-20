@@ -101,7 +101,6 @@ export BNKF2Status bnkf2_bnkToZip (
 	typeof(zlibStream.avail_in) previousAvailIn = void;
 	int zlibStatus = void;
 	uint fileTableBufferSize = void;
-	const(ubyte)* compressedFileTable = void;
 	ubyte* fileTable = void;
 	size_t fileTableSize = void;
 	size_t remainingInFileTable = void;
@@ -253,7 +252,6 @@ export BNKF2Status bnkf2_bnkToZip (
 	}
 
 	fileTableBufferSize = greaterOf(totalUncompressedHeaderSize.alignUpTo(minimumPageSize), cast(uint) minimumPageSize);
-	compressedFileTable = bnkFileHeader.compressedFileTable.ptr;
 
 	previousAvailIn = 0;
 
