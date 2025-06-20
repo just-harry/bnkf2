@@ -829,12 +829,16 @@ int invokeFileConversionCommand (scope InvocationDictates.FileConversion* fileCo
 		state.packedState |= (fileConversion.switches & S.ignoreBNKF2Metadata) ? state.packedState.Flags.ignoreBNKF2MetadataForCompressionSetting : 0;
 		state.packedState |= (fileConversion.switches & S.outputCompressedBNK) ? state.packedState.Flags.outputCompressedBNK : 0;
 
+		state.bnkVersion = 3;
+
 		state.fileTableCompressionLevel = (fileConversion.switches & S.fileTableCompressionLevel) ? fileConversion.fileTableCompressionLevel : state.fileTableCompressionLevel.default_;
 		state.fileTableMemoryLevel = (fileConversion.switches & S.fileTableMemoryLevel) ? fileConversion.fileTableMemoryLevel : state.fileTableMemoryLevel.default_;
 		state.fileDataCompressionLevel = (fileConversion.switches & S.fileDataCompressionLevel) ? fileConversion.fileDataCompressionLevel : state.fileDataCompressionLevel.default_;
 		state.fileDataMemoryLevel = (fileConversion.switches & S.fileDataMemoryLevel) ? fileConversion.fileDataMemoryLevel : state.fileDataMemoryLevel.default_;
 
 		state.fileTableUncompressedChunkThreshold = (fileConversion.switches & S.fileTableUncompressedChunkThreshold) ? fileConversion.fileTableUncompressedChunkThreshold : 0;
+
+		context.bnkVersion = &result.v0.bnkVersion;
 
 		BNKF2Status zipToBNKStatus = bnkf2_zipToBNK(&context, &inputBuffer, &bnkFileFlusher!(), &state);
 
@@ -1026,7 +1030,15 @@ struct BNKFileFlusherContext
 	HANDLE sparseFile;
 	ulong[3] fileOffsetsByBuffer;
 	ubyte* allocatedMemory;
-	BNK.FileHeader ultimateFileHeader;
+	uint[2] variableBufferSizes;
+	uint* bnkVersion;
+	UltimateFileHeader ultimateFileHeader;
+
+	union UltimateFileHeader
+	{
+		BNK.FileHeaderV3 v3;
+		BNK.FileHeaderV2 v2;
+	}
 }
 
 
@@ -1067,8 +1079,19 @@ size_t bnkFileFlusher () (
 			}
 
 			state.fileOffsetsByBuffer[0] = 0;
-			state.fileOffsetsByBuffer[1] = BNK.FileHeader.sizeof;
+			state.fileOffsetsByBuffer[1] = *state.bnkVersion != 2 ? BNK.FileHeaderV3.sizeof : BNK.FileHeaderV2.sizeof;
 			state.fileOffsetsByBuffer[2] = ulong(4) << 30;
+
+			if (*state.bnkVersion != 2)
+			{
+				state.variableBufferSizes[0] = fileTableBufferSize;
+				state.variableBufferSizes[1] = fileDataBufferSize;
+			}
+			else
+			{
+				state.variableBufferSizes[0] = fileDataBufferSize;
+				state.variableBufferSizes[1] = fileTableBufferSize;
+			}
 
 			return 0;
 		}
@@ -1173,13 +1196,13 @@ size_t bnkFileFlusher () (
 		}
 		else if (bufferIndex == 1)
 		{
-			*freshBuffer = state.allocatedMemory + fileDataBufferSize;
-			return fileTableBufferSize;
+			*freshBuffer = state.allocatedMemory;
+			return state.variableBufferSizes[0];
 		}
 		else
 		{
-			*freshBuffer = state.allocatedMemory;
-			return fileDataBufferSize;
+			*freshBuffer = state.allocatedMemory + state.variableBufferSizes[0];
+			return state.variableBufferSizes[1];
 		}
 	}
 	else if (flushSize == 0)
@@ -1206,11 +1229,11 @@ size_t bnkFileFlusher () (
 
 	if (bufferIndex == 2)
 	{
-		return fileDataBufferSize;
+		return state.variableBufferSizes[1];
 	}
 	else if (bufferIndex == 1)
 	{
-		return fileTableBufferSize;
+		return state.variableBufferSizes[0];
 	}
 	else
 	{

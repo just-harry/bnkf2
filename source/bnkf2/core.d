@@ -39,8 +39,30 @@ struct BNK
 	align(1)
 	struct FileHeader
 	{
-		BigEndian!uint dataOffset;
+		BigEndian!uint offset;
 		BigEndian!uint version_;
+
+		static assert(FileHeader.sizeof == 8);
+	}
+
+	align(1)
+	struct FileHeaderV2
+	{
+		alias header this;
+		FileHeader header;
+		/+ This is tentative--I've yet to encounter a compressed V2 BNK file. +/
+		ubyte filesAreCompressed;
+		ubyte[7] padding;
+		ubyte[0] fileData;
+
+		static assert(FileHeaderV2.sizeof == 16);
+	}
+
+	align(1)
+	struct FileHeaderV3
+	{
+		alias header this;
+		FileHeader header;
 		ubyte filesAreCompressed;
 	align(1)
 		BigEndian!uint compressedHeaderSize;
@@ -48,7 +70,7 @@ struct BNK
 		BigEndian!uint uncompressedHeaderSize;
 		ubyte[0] compressedFileTable;
 
-		static assert(FileHeader.sizeof == 17);
+		static assert(FileHeaderV3.sizeof == 17);
 	}
 
 	struct FileTable
@@ -356,6 +378,7 @@ struct BNKToZipResult
 	struct V0
 	{
 		PackedState packedState;
+		uint bnkVersion;
 
 		struct PackedState
 		{
@@ -367,7 +390,8 @@ struct BNKToZipResult
 			{
 				none = 0,
 				bnkCompressionStatusIsKnown = 1 << 0,
-				bnkWasCompressed = 1 << 1
+				bnkWasCompressed = 1 << 1,
+				bnkVersionIsKnown = 1 << 2
 			}
 		}
 	}
@@ -503,6 +527,7 @@ struct ZipToBNKResult
 	struct V0
 	{
 		PackedState packedState;
+		uint bnkVersion;
 
 		struct PackedState
 		{
@@ -514,7 +539,8 @@ struct ZipToBNKResult
 			{
 				none = 0,
 				bnkCompressionStatusIsKnown = 1 << 0,
-				bnkIsCompressed = 1 << 1
+				bnkIsCompressed = 1 << 1,
+				bnkVersionIsKnown = 1 << 2
 			}
 		}
 	}
@@ -539,7 +565,8 @@ struct ZipToBNKState
 			none = 0,
 			forwardAllocatorToZLib = 1 << 0,
 			ignoreBNKF2MetadataForCompressionSetting = 1 << 5,
-			outputCompressedBNK = 1 << 6
+			outputCompressedBNK = 1 << 6,
+			ignoreBNKF2MetadataForBNKVersion = 1 << 7
 		}
 
 		size_t value;
@@ -552,6 +579,8 @@ struct ZipToBNKState
 	ZipToBNKResult* extendedReturnChannel;
 
 	uint version_;
+
+	uint bnkVersion;
 
 	DEFLATECompressionLevel fileTableCompressionLevel;
 	ZLibMemoryLevel fileTableMemoryLevel;
@@ -802,10 +831,18 @@ struct BNKF2MetadataFileContents
 		}
 	}
 
+	struct V1
+	{
+		alias v0 this;
+		V0 v0;
+		uint bnkVersion;
+	}
+
 	union
 	{
 		V_ v_;
 		V0 v0;
+		V1 v1;
 	}
 }
 

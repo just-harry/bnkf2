@@ -47,6 +47,7 @@ export BNKF2Status bnkf2_bnkToZip (
 	}
 
 	state.extendedReturnChannel.v0.packedState = 0;
+	state.extendedReturnChannel.v0.bnkVersion = 0;
 
 	const(ubyte)* input = inputBuffer.ptr;
 	size_t inputLength = inputBuffer.length;
@@ -77,7 +78,11 @@ export BNKF2Status bnkf2_bnkToZip (
 
 	/+ Boy, I really love D's `Error: `goto` skips declaration of variable`.
 	   For, I really yearn for the ergonomics of C-fucking-89. +/
+	bool asVersion3BNK = void;
 	Unaligned!(const(BNK.FileHeader))* bnkFileHeader = void;
+	Unaligned!(const(BNK.FileHeaderV2))* bnkFileHeaderV2 = void;
+	Unaligned!(const(BNK.FileHeaderV3))* bnkFileHeaderV3 = void;
+	uint bnkVersion = void;
 	uint bnkDataOffset = void;
 	uint compressedHeaderSize = void;
 	uint uncompressedHeaderSize = void;
@@ -88,6 +93,7 @@ export BNKF2Status bnkf2_bnkToZip (
 	uint fileCount = void;
 	uint emittedFileCount = void;
 	ubyte* fileTableBuffer = void;
+	size_t initialContinuationOffset = void;
 	size_t continuationOffset = void;
 	uint continuationCompressedSize = void;
 	uint continuationUncompressedSize = void;
@@ -176,15 +182,36 @@ export BNKF2Status bnkf2_bnkToZip (
 	mixin(consume!(q{BNK.FileHeader.sizeof}, q{failedWithOutputBuffer}));
 
 	bnkFileHeader = unaligned(cast(const(BNK.FileHeader)*) input);
+	bnkVersion = bnkFileHeader.version_;
 
-	bnkIsCompressed = bnkFileHeader.filesAreCompressed != 0;
+	state.extendedReturnChannel.v0.packedState |= state.extendedReturnChannel.v0.packedState.Flags.bnkVersionIsKnown;
+	state.extendedReturnChannel.v0.bnkVersion = bnkVersion;
+
+	if (bnkVersion == 2)
+	{
+		mixin(consume!(q{BNK.FileHeaderV2.sizeof - BNK.FileHeader.sizeof}, q{failedWithOutputBuffer}));
+
+		asVersion3BNK = false;
+		bnkFileHeaderV2 = unaligned(cast(const(BNK.FileHeaderV2)*) input);
+
+		bnkIsCompressed = bnkFileHeaderV2.filesAreCompressed != 0;
+	}
+	else
+	{
+		mixin(consume!(q{BNK.FileHeaderV3.sizeof - BNK.FileHeader.sizeof}, q{failedWithOutputBuffer}));
+
+		asVersion3BNK = true;
+		bnkFileHeaderV3 = unaligned(cast(const(BNK.FileHeaderV3)*) input);
+
+		bnkIsCompressed = bnkFileHeaderV3.filesAreCompressed != 0;
+	}
 
 	state.extendedReturnChannel.v0.packedState |= state.extendedReturnChannel.v0.packedState.Flags.bnkCompressionStatusIsKnown;
 	state.extendedReturnChannel.v0.packedState |= (
 		bnkIsCompressed ? state.extendedReturnChannel.v0.packedState.Flags.bnkWasCompressed : 0
 	);
 
-	bnkDataOffset = bnkFileHeader.dataOffset;
+	bnkDataOffset = bnkFileHeader.offset;
 
 	if (bnkDataOffset > inputLength)
 	{
@@ -192,7 +219,25 @@ export BNKF2Status bnkf2_bnkToZip (
 		goto failedWithOutputBuffer;
 	}
 
-	compressedHeaderSize = bnkFileHeader.compressedHeaderSize;
+	if (asVersion3BNK)
+	{
+		initialContinuationOffset = BNK.FileHeaderV3.compressedHeaderSize.offsetof;
+		bnkDataLength = inputLength - bnkDataOffset;
+	}
+	else
+	{
+		mixin(consume!(q{BNK.FileTableContinuationHeader.sizeof}, q{failedWithOutputBuffer}));
+		mixin(consume!(q{bnkDataOffset}, q{failedWithOutputBuffer}));
+		initialContinuationOffset = bnkDataOffset;
+		bnkDataOffset = BNK.FileHeaderV2.fileData.offsetof;
+		bnkDataLength = initialContinuationOffset - bnkDataOffset;
+	}
+
+	continuationOffset = initialContinuationOffset;
+
+	continuationHeader = cast(Unaligned!(const(BNK.FileTableContinuationHeader))*) (input + continuationOffset);
+
+	compressedHeaderSize = continuationHeader.compressedSize;
 
 	mixin(consume!(q{compressedHeaderSize}, q{failedWithOutputBuffer}));
 
@@ -215,18 +260,26 @@ export BNKF2Status bnkf2_bnkToZip (
 	   So, we'll scan ahead to get the complete size. +/
 
 	fileTableChunkCount = 1;
-	uncompressedHeaderSize = bnkFileHeader.uncompressedHeaderSize;
+	uncompressedHeaderSize = continuationHeader.uncompressedSize;
 	totalUncompressedHeaderSize = uncompressedHeaderSize;
 
 	if (compressedHeaderSize != 0)
 	{
-		continuationOffset = BNK.FileHeader.sizeof;
+		bool shouldContinue = true;
+
 		continuationCompressedSize = compressedHeaderSize;
+		continuationOffset += BNK.FileTableContinuationHeader.sizeof;
 	windThroughCompressedHeaders:
 		if (ulong(continuationOffset) + continuationCompressedSize + BNK.FileTableContinuationHeader.sizeof > inputLength)
 		{
-			mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.inputIsTruncated)});
-			goto failedWithOutputBuffer;
+			if (asVersion3BNK | (ulong(continuationOffset) + continuationCompressedSize > inputLength))
+			{
+				mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.inputIsTruncated)});
+				goto failedWithOutputBuffer;
+			}
+
+			/+ V2 BNK file-tables are implicitly terminated by the end-of-the-file. +/
+			shouldContinue = false;
 		}
 
 		continuationOffset += continuationCompressedSize;
@@ -244,7 +297,7 @@ export BNKF2Status bnkf2_bnkToZip (
 
 		totalUncompressedHeaderSize += continuationUncompressedSize;
 
-		if (continuationCompressedSize != 0)
+		if ((continuationCompressedSize != 0) & shouldContinue)
 		{
 			++fileTableChunkCount;
 			goto windThroughCompressedHeaders;
@@ -273,10 +326,10 @@ export BNKF2Status bnkf2_bnkToZip (
 beginDecompressingFileTable:
 	remainingFileTableChunks = fileTableChunkCount;
 
-	continuationOffset = BNK.FileHeader.sizeof;
+	continuationOffset = initialContinuationOffset + BNK.FileTableContinuationHeader.sizeof;
 	continuationCompressedSize = compressedHeaderSize;
 
-	zlibStream.next_in = input + BNK.FileHeader.sizeof;
+	zlibStream.next_in = input + continuationOffset;
 	zlibStream.avail_in = compressedHeaderSize;
 
 	if ((zlibStatus = state.zlib.inflateInit_(&zlibStream, ZLIB_VERSION, z_stream.sizeof)) != Z_OK)
@@ -440,13 +493,15 @@ decompressedFileTable:
 		   into the zip which details some information about the source BNK file.
 		   Namely, whether or not it was compressed, so that we can roundtrip
 		   a BNK file from a zip without requiring the user to keep track of
-		   and specify whether the BNK file is compressed or not. +/
+		   and specify whether the BNK file is compressed or not.
+		   And also which version of the BNK format the BNK file uses. +/
 
-		BNKF2MetadataFileContents.V0 metadata;
+		BNKF2MetadataFileContents.V1 metadata;
 		metadata.signature = BNKF2MetadataFileContents.V_.magic;
-		metadata.version_ = 0;
+		metadata.version_ = 1;
 		metadata.packedState = 0;
 		metadata.packedState |= bnkIsCompressed ? metadata.packedState.Flags.bnkWasCompressed : 0;
+		metadata.bnkVersion = bnkVersion;
 
 		/+ The 11th bit indicates that the file-name is UTF-8 encoded. +/
 		localFileHeader.bitFlags = 1 << 11;
@@ -485,7 +540,6 @@ decompressedFileTable:
 	slashSwapDeltaVector = forwardSlashVector - backSlashVector;
 
 	bnkData = input + bnkDataOffset;
-	bnkDataLength = inputLength - bnkDataOffset;
 
 	remainingFileCount = fileCount;
 	fileIndex = 0;
@@ -900,7 +954,7 @@ secondPassOfFileTable:
 
 	if (!(state.packedState & state.packedState.Flags.omitBNKF2Metadata))
 	{
-		alias Metadata = BNKF2MetadataFileContents.V0;
+		alias Metadata = BNKF2MetadataFileContents.V1;
 
 		centralDirectoryRecord.signature = centralDirectoryRecord.magic;
 		centralDirectoryRecord.versionMadeBy = (bnkF2ZipFileHostOS << 8) |10;
@@ -1177,6 +1231,12 @@ export BNKF2Status bnkf2_zipToBNK (
 		);
 	}
 
+	if (state.packedState & state.packedState.Flags.ignoreBNKF2MetadataForBNKVersion)
+	{
+		state.extendedReturnChannel.v0.packedState |= state.extendedReturnChannel.v0.packedState.Flags.bnkVersionIsKnown;
+		state.extendedReturnChannel.v0.bnkVersion = state.bnkVersion;
+	}
+
 	size_t inputLength = inputBuffer.length;
 	const(ubyte)* inputBase = inputBuffer.ptr;
 	const(ubyte)* endOfInput = inputBase + inputLength;
@@ -1212,29 +1272,6 @@ export BNKF2Status bnkf2_zipToBNK (
 
 	OutputBuffer[outputBufferCount] output;
 	size_t flusherStatus = void;
-
-	if ((flusherStatus = outputFlusher(context, null, null, outputBufferCount, -1)) != 0)
-	{
-		state.memoryAllocators.free(uncompressedFileTableBuffer, mixin(fileTableBuffersSize));
-		return BNKF2Status.caller(cast(uint) flusherStatus);
-	}
-
-	foreach (bufferIndex; 0 .. outputBufferCount)
-	{
-		output[bufferIndex].space = outputFlusher(
-			context,
-			&output[bufferIndex].buffer,
-			output[bufferIndex].buffer,
-			output[bufferIndex].offset,
-			bufferIndex
-		);
-
-		if (output[bufferIndex].buffer == null)
-		{
-			state.memoryAllocators.free(uncompressedFileTableBuffer, mixin(fileTableBuffersSize));
-			return BNKF2Status.caller(cast(uint) output[bufferIndex].space);
-		}
-	}
 
 	enum string fail (string failureStatus) =
 	`
@@ -1308,10 +1345,24 @@ export BNKF2Status bnkf2_zipToBNK (
 	bool foundBNKF2Metadata = void;
 	bool originalBNKWasCompressed = void;
 	bool outputtingCompressedBNKFile = void;
+	uint originalBNKVersion = void;
+	uint outputBNKVersion = void;
+	ubyte fileTableBufferIndex = void;
+	ubyte fileDataBufferIndex = void;
+	ubyte filePaddingLength = void;
+	ubyte filePaddingMask = void;
 	V backSlashVector = void;
 	V forwardSlashVector = void;
 	V slashSwapDeltaVector = void;
-	BNK.FileHeader ultimateFileHeader = void;
+	uint ultimateFileHeaderSize = void;
+
+	static union UltimateFileHeader
+	{
+		BNK.FileHeaderV3 v3;
+		BNK.FileHeaderV2 v2;
+	}
+
+	UltimateFileHeader ultimateFileHeader = void;
 	BNK.FileTableContinuationHeader terminalContinuationHeader = void;
 	BigEndian!uint bigEndianUInt = void;
 	z_stream fileTableZLibStream = void;
@@ -1441,7 +1492,7 @@ export BNKF2Status bnkf2_zipToBNK (
 
 				totalCompressedFileTableSize += deflatedSize;
 
-				if (initialUncompressedFileTableChunkSize == -1)
+				if ((outputBNKVersion != 2) & (initialUncompressedFileTableChunkSize == -1))
 				{
 					initialUncompressedFileTableChunkSize = uncompressedFileTableBufferSize;
 					initialCompressedFileTableChunkSize = deflatedSize;
@@ -1456,7 +1507,7 @@ export BNKF2Status bnkf2_zipToBNK (
 
 					mixin(
 						flushSplitOutput!(
-							q{1},
+							q{fileTableBufferIndex},
 							q{continuationHeader.sizeof},
 							q{cast(const(ubyte)*) &continuationHeader},
 							q{` ~ failureTarget ~ `}
@@ -1464,7 +1515,7 @@ export BNKF2Status bnkf2_zipToBNK (
 					);
 				}
 
-				mixin(flushSplitOutput!(q{1}, q{deflatedSize}, q{compressedFileTableBuffer}, q{` ~ failureTarget ~ `}));
+				mixin(flushSplitOutput!(q{fileTableBufferIndex}, q{deflatedSize}, q{compressedFileTableBuffer}, q{` ~ failureTarget ~ `}));
 
 				uncompressedFileTableOffset = 0;
 
@@ -1484,7 +1535,7 @@ export BNKF2Status bnkf2_zipToBNK (
 
 	mixin(reportProgress!(q{searchingForCentralDirectory}, q{null}, q{0}));
 
-	mixin(consume!(q{Zip.EndOfCentralDirectoryRecord.sizeof}, q{failedWithOutputBuffer}));
+	mixin(consume!(q{Zip.EndOfCentralDirectoryRecord.sizeof}, q{failedWithUncompressedFileTableBuffer}));
 
 	input -= Zip.EndOfCentralDirectoryRecord.sizeof;
 	bytesLeftForFindingEndOfCentralDirectoryRecord = ushort.max;
@@ -1497,10 +1548,10 @@ findTheEndOfCentralDirectoryRecord:
 		if (bytesLeftForFindingEndOfCentralDirectoryRecord == 0)
 		{
 			mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.couldNotFindEndOfCentralDirectoryRecordInZip)});
-			goto failedWithOutputBuffer;
+			goto failedWithUncompressedFileTableBuffer;
 		}
 	goBackToFindTheEndOfCentralDirectoryRecord:
-		mixin(consume!(q{1}, q{failedWithOutputBuffer}));
+		mixin(consume!(q{1}, q{failedWithUncompressedFileTableBuffer}));
 		--input;
 
 		goto findTheEndOfCentralDirectoryRecord;
@@ -1528,14 +1579,14 @@ findTheEndOfCentralDirectoryRecord:
 
 	if (is64BitZip)
 	{
-		mixin(consume!(q{Zip.EndOfCentralDirectoryLocator64.sizeof}, q{failedWithOutputBuffer}));
+		mixin(consume!(q{Zip.EndOfCentralDirectoryLocator64.sizeof}, q{failedWithUncompressedFileTableBuffer}));
 		input -= Zip.EndOfCentralDirectoryLocator64.sizeof;
 		endOfCentralDirectoryLocator64 = cast(typeof(endOfCentralDirectoryLocator64)) input;
 
 		if (endOfCentralDirectoryLocator64.signature != endOfCentralDirectoryLocator64.magic)
 		{
 			mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.invalidSignatureForEndOfCentralDirectoryLocator64InZip)});
-			goto failedWithOutputBuffer;
+			goto failedWithUncompressedFileTableBuffer;
 		}
 
 		ulong endOfCentralDirectoryRecord64Offset = endOfCentralDirectoryLocator64.offsetOfEndOfCentralDirectoryRecord64RelativeToDiskThatContainsIt;
@@ -1547,7 +1598,7 @@ findTheEndOfCentralDirectoryRecord:
 		)
 		{
 			mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.invalidOffsetForEndOfCentralDirectoryRecord64InZip)});
-			goto failedWithOutputBuffer;
+			goto failedWithUncompressedFileTableBuffer;
 		}
 
 		remaining = cast(size_t) endOfCentralDirectoryRecord64Offset;
@@ -1558,7 +1609,7 @@ findTheEndOfCentralDirectoryRecord:
 		if (endOfCentralDirectoryRecord64.signature != endOfCentralDirectoryRecord64.magic)
 		{
 			mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.invalidSignatureForEndOfCentralDirectoryRecord64InZip)});
-			goto failedWithOutputBuffer;
+			goto failedWithUncompressedFileTableBuffer;
 		}
 
 		ulong sizeOfEndOfCentralDirectory64 = endOfCentralDirectoryRecord64.sizeOfEndOfCentralDirectory64;
@@ -1566,7 +1617,7 @@ findTheEndOfCentralDirectoryRecord:
 		if (sizeOfEndOfCentralDirectory64 > ulong.max - 12 - endOfCentralDirectoryRecord64Offset)
 		{
 			mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.invalidSizeForEndOfCentralDirectoryRecord64InZip)});
-			goto failedWithOutputBuffer;
+			goto failedWithUncompressedFileTableBuffer;
 		}
 
 		if (
@@ -1575,7 +1626,7 @@ findTheEndOfCentralDirectoryRecord:
 		)
 		{
 			mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.invalidSizeForEndOfCentralDirectoryRecord64InZip)});
-			goto failedWithOutputBuffer;
+			goto failedWithUncompressedFileTableBuffer;
 		}
 
 		/+ I'm going to assume that the fields of the 64-bit end-of-central-directory-record
@@ -1586,7 +1637,7 @@ findTheEndOfCentralDirectoryRecord:
 			if (sizeOfEndOfCentralDirectory64 < Zip.EndOfCentralDirectoryRecord64.entryCountOfCentralDirectory64.offsetof - 12)
 			{
 				mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.invalidSizeForEndOfCentralDirectoryRecord64InZip)});
-				goto failedWithOutputBuffer;
+				goto failedWithUncompressedFileTableBuffer;
 			}
 
 			entryCountOfCentralDirectory = endOfCentralDirectoryRecord64.entryCountOfCentralDirectory64;
@@ -1601,7 +1652,7 @@ findTheEndOfCentralDirectoryRecord:
 			if (sizeOfEndOfCentralDirectory64 < Zip.EndOfCentralDirectoryRecord64.offsetOfCentralDirectory64RelativeToDiskThatContainsIt.offsetof - 12)
 			{
 				mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.invalidSizeForEndOfCentralDirectoryRecord64InZip)});
-				goto failedWithOutputBuffer;
+				goto failedWithUncompressedFileTableBuffer;
 			}
 
 			offsetOfCentralDirectory = endOfCentralDirectoryRecord64.offsetOfCentralDirectory64RelativeToDiskThatContainsIt;
@@ -1621,7 +1672,7 @@ findTheEndOfCentralDirectoryRecord:
 	if (offsetOfCentralDirectory >= remaining)
 	{
 		mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.invalidOffsetForCentralDirectoryInZip)});
-		goto failedWithOutputBuffer;
+		goto failedWithUncompressedFileTableBuffer;
 	}
 
 	if (
@@ -1630,7 +1681,7 @@ findTheEndOfCentralDirectoryRecord:
 	)
 	{
 		mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.invalidSizeForCentralDirectoryInZip)});
-		goto failedWithOutputBuffer;
+		goto failedWithUncompressedFileTableBuffer;
 	}
 
 	remaining = offsetOfCentralDirectory;
@@ -1648,13 +1699,13 @@ findTheEndOfCentralDirectoryRecord:
 	if (remainingEntriesOfCentralDirectory == 0)
 	{
 		/+ The zip has no entries, so we'll just write out an emptyish BNK file.  +/
-		ultimateFileHeader.dataOffset = 0;
-		ultimateFileHeader.version_ = 3;
-		ultimateFileHeader.filesAreCompressed = false;
-		ultimateFileHeader.compressedHeaderSize = 0;
-		ultimateFileHeader.uncompressedHeaderSize = 0;
+		outputBNKVersion = state.bnkVersion;
 
-		goto successful;
+		state.extendedReturnChannel.v0.packedState |= state.extendedReturnChannel.v0.packedState.Flags.bnkVersionIsKnown;
+		state.extendedReturnChannel.v0.bnkVersion = outputBNKVersion;
+
+		fileCountOfCentralDirectory = 0;
+		goto maybeWriteOutEmptyishBNKFile;
 	}
 
 	centralDirectoryRecord = centralDirectoryBase;
@@ -1667,37 +1718,37 @@ nextCentralDirectoryFirstPass:
 	if (cast(const(ubyte)*) centralDirectoryRecord + Zip.CentralDirectoryRecord.sizeof >= endOfInput)
 	{
 		mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.invalidOffsetForCentralDirectoryRecordInZip)});
-		goto failedWithOutputBuffer;
+		goto failedWithUncompressedFileTableBuffer;
 	}
 
 	if (centralDirectoryRecord.signature != centralDirectoryRecord.magic)
 	{
 		mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.invalidSignatureForCentralDirectoryRecordInZip)});
-		goto failedWithOutputBuffer;
+		goto failedWithUncompressedFileTableBuffer;
 	}
 
 	if (centralDirectoryRecord.versionRequiredForExtraction > 45)
 	{
 		mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.unsupportedVersionRequiredForExtractionInZip)});
-		goto failedWithOutputBuffer;
+		goto failedWithUncompressedFileTableBuffer;
 	}
 
 	if (centralDirectoryRecord.bitFlags & ((1 << 0) | (1 << 6) | (1 << 13)))
 	{
 		mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.unsupportedEncryptedFileInZip)});
-		goto failedWithOutputBuffer;
+		goto failedWithUncompressedFileTableBuffer;
 	}
 
 	if (centralDirectoryRecord.bitFlags & (1 << 5))
 	{
 		mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.unsupportedCompressedPatchedDataInZip)});
-		goto failedWithOutputBuffer;
+		goto failedWithUncompressedFileTableBuffer;
 	}
 
 	if (centralDirectoryRecord.bitFlags & ((1 << 4) | (1 << 12)))
 	{
 		mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.unsupportedEnhancedCompressionInZip)});
-		goto failedWithOutputBuffer;
+		goto failedWithUncompressedFileTableBuffer;
 	}
 
 	/+ To follow the specification strictly, we should check bit 11 to see if
@@ -1708,7 +1759,7 @@ nextCentralDirectoryFirstPass:
 	if ((centralDirectoryRecord.compressionMethod != 0) & (centralDirectoryRecord.compressionMethod != 8))
 	{
 		mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.unsupportedCompressionMethodInZip)});
-		goto failedWithOutputBuffer;
+		goto failedWithUncompressedFileTableBuffer;
 	}
 
 	compressionMethod = centralDirectoryRecord.compressionMethod;
@@ -1725,7 +1776,7 @@ nextCentralDirectoryFirstPass:
 	)
 	{
 		mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.invalidFooterSizeForCentralDirectoryRecordInZip)});
-		goto failedWithOutputBuffer;
+		goto failedWithUncompressedFileTableBuffer;
 	}
 
 	nameIsNullTerminated = (
@@ -1738,7 +1789,7 @@ nextCentralDirectoryFirstPass:
 	if (cast(ushort) uncompressedFileNameLength == 0)
 	{
 		mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.excessivelyLongFileNameForCentralDirectoryRecordInZip)});
-		goto failedWithOutputBuffer;
+		goto failedWithUncompressedFileTableBuffer;
 	}
 
 	centralDirectoryRecordIs64Bit = (
@@ -1759,7 +1810,7 @@ nextCentralDirectoryFirstPass:
 		if (centralDirectoryRecord.extraFieldLength < requiredExtraFieldSize)
 		{
 			mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.invalidExtraFieldLengthForCentralDirectoryRecordInZip)});
-			goto failedWithOutputBuffer;
+			goto failedWithUncompressedFileTableBuffer;
 		}
 
 		uint extraFieldOffset = 0;
@@ -1774,7 +1825,7 @@ nextCentralDirectoryFirstPass:
 			if (extraFieldOffset > ushort.max - Zip.ExtraFieldHeader.sizeof - extraFieldHeader.fieldSize)
 			{
 				mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.invalidExtraFieldSizeForCentralDirectoryRecordInZip)});
-				goto failedWithOutputBuffer;
+				goto failedWithUncompressedFileTableBuffer;
 			}
 
 			extraFieldOffset += extraFieldHeader.fieldSize + Zip.ExtraFieldHeader.sizeof;
@@ -1782,13 +1833,13 @@ nextCentralDirectoryFirstPass:
 			if (extraFieldOffset > centralDirectoryRecord.extraFieldLength)
 			{
 				mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.invalidExtraFieldSizeForCentralDirectoryRecordInZip)});
-				goto failedWithOutputBuffer;
+				goto failedWithUncompressedFileTableBuffer;
 			}
 
 			if (extraFieldOffset > ushort.max - requiredExtraFieldSize)
 			{
 				mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.failedToFindExtendedInformationExtraField64ForCentralDirectoryRecordInZip)});
-				goto failedWithOutputBuffer;
+				goto failedWithUncompressedFileTableBuffer;
 			}
 
 			goto findExtendedInformationExtraField64DuringFirstPass;
@@ -1858,7 +1909,7 @@ nextCentralDirectoryFirstPass:
 	if (offsetOfLocalHeaderOfFile > cast(size_t) centralDirectoryBase - cast(size_t) inputBase)
 	{
 		mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.invalidOffsetForLocalFileHeaderInZip)});
-		goto failedWithOutputBuffer;
+		goto failedWithUncompressedFileTableBuffer;
 	}
 
 	if (
@@ -1867,19 +1918,19 @@ nextCentralDirectoryFirstPass:
 	)
 	{
 		mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.invalidCompressedSizeForFileInZip)});
-		goto failedWithOutputBuffer;
+		goto failedWithUncompressedFileTableBuffer;
 	}
 
 	if ((compressionMethod == 0) & (uncompressedSizeOfFile != compressedSizeOfFile))
 	{
 		mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.invalidUncompressedSizeForFileInZip)});
-		goto failedWithOutputBuffer;
+		goto failedWithUncompressedFileTableBuffer;
 	}
 
 	if (accumulatedCompressedFileOffset > uint.max - cast(uint) compressedSizeOfFile)
 	{
 		mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.zipFileIsTooBigForBNKFile)});
-		goto failedWithOutputBuffer;
+		goto failedWithUncompressedFileTableBuffer;
 	}
 
 	localFileHeader = cast(typeof(localFileHeader)) (inputBase + offsetOfLocalHeaderOfFile);
@@ -1887,7 +1938,7 @@ nextCentralDirectoryFirstPass:
 	if (localFileHeader.signature != localFileHeader.magic)
 	{
 		mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.invalidSignatureForLocalFileHeaderInZip)});
-		goto failedWithOutputBuffer;
+		goto failedWithUncompressedFileTableBuffer;
 	}
 
 	localFileHeaderFooterSize = uint(localFileHeader.fileNameLength) + uint(localFileHeader.extraFieldLength);
@@ -1898,7 +1949,7 @@ nextCentralDirectoryFirstPass:
 	)
 	{
 		mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.invalidFooterSizeForCentralDirectoryRecordInZip)});
-		goto failedWithOutputBuffer;
+		goto failedWithUncompressedFileTableBuffer;
 	}
 
 	localFileData = cast(const(ubyte)*) localFileHeader + Zip.LocalFileHeader.sizeof + localFileHeaderFooterSize;
@@ -1906,7 +1957,7 @@ nextCentralDirectoryFirstPass:
 	if (compressedSizeOfFile > cast(size_t) centralDirectoryBase - cast(size_t) localFileData)
 	{
 		mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.invalidSizeForFileInZip)});
-		goto failedWithOutputBuffer;
+		goto failedWithUncompressedFileTableBuffer;
 	}
 
 	if (centralDirectoryRecord.fileNameLength == BNKF2MetadataFileContents.fileName.length)
@@ -1923,7 +1974,7 @@ nextCentralDirectoryFirstPass:
 			/+ We can just ignore any errors with regards to the BNKF2 metadata,
 			   they're irrelevant for the actual BNK data. +/
 
-			static assert(BNKF2MetadataFileContents.sizeof == 8);
+			static assert(BNKF2MetadataFileContents.sizeof == 12);
 			ubyte[16] buffer = void;
 			const(ubyte)* metadataData = void;
 			uint metadataSize = void;
@@ -1994,6 +2045,8 @@ nextCentralDirectoryFirstPass:
 					goto skippingEntryDuringFirstPass;
 				}
 
+				originalBNKVersion = 3;
+			metadataV0:
 				Unaligned!(const(BNKF2MetadataFileContents.V0))* v0 = (
 					cast(Unaligned!(const(BNKF2MetadataFileContents.V0))*) metadataData
 				);
@@ -2001,6 +2054,19 @@ nextCentralDirectoryFirstPass:
 				originalBNKWasCompressed = !!(v0.packedState & v0.packedState.Flags.bnkWasCompressed);
 
 				break;
+			case 1:
+				if (metadataSize < BNKF2MetadataFileContents.V1.sizeof)
+				{
+					goto skippingEntryDuringFirstPass;
+				}
+
+				Unaligned!(const(BNKF2MetadataFileContents.V1))* v1 = (
+					cast(Unaligned!(const(BNKF2MetadataFileContents.V1))*) metadataData
+				);
+
+				originalBNKVersion = v1.bnkVersion;
+
+				goto metadataV0;
 			default:
 				goto skippingEntryDuringFirstPass;
 			}
@@ -2022,14 +2088,69 @@ skippingEntryDuringFirstPass:
 		goto nextCentralDirectoryFirstPass;
 	}
 
+	if (state.packedState & state.packedState.Flags.ignoreBNKF2MetadataForBNKVersion)
+	{
+		outputBNKVersion = state.bnkVersion;
+	}
+	else
+	{
+		if (foundBNKF2Metadata)
+		{
+			outputBNKVersion = originalBNKVersion;
+		}
+		else
+		{
+			outputBNKVersion = state.bnkVersion;
+		}
+
+		state.extendedReturnChannel.v0.packedState |= state.extendedReturnChannel.v0.packedState.Flags.bnkVersionIsKnown;
+		state.extendedReturnChannel.v0.bnkVersion = outputBNKVersion;
+	}
+
+maybeWriteOutEmptyishBNKFile:
+	/+ We initialise the output-flushers here so that they can inspect the output BNK version. +/
+
+	if ((flusherStatus = outputFlusher(context, null, null, outputBufferCount, -1)) != 0)
+	{
+		state.memoryAllocators.free(uncompressedFileTableBuffer, mixin(fileTableBuffersSize));
+		return BNKF2Status.caller(cast(uint) flusherStatus);
+	}
+
+	foreach (bufferIndex; 0 .. outputBufferCount)
+	{
+		output[bufferIndex].space = outputFlusher(
+			context,
+			&output[bufferIndex].buffer,
+			output[bufferIndex].buffer,
+			output[bufferIndex].offset,
+			bufferIndex
+		);
+
+		if (output[bufferIndex].buffer == null)
+		{
+			state.memoryAllocators.free(uncompressedFileTableBuffer, mixin(fileTableBuffersSize));
+			return BNKF2Status.caller(cast(uint) output[bufferIndex].space);
+		}
+	}
+
 	if (fileCountOfCentralDirectory == 0)
 	{
 		/+ The zip has no files, so we'll just write out an emptyish BNK file.  +/
-		ultimateFileHeader.dataOffset = 0;
-		ultimateFileHeader.version_ = 3;
-		ultimateFileHeader.filesAreCompressed = false;
-		ultimateFileHeader.compressedHeaderSize = 0;
-		ultimateFileHeader.uncompressedHeaderSize = 0;
+		if (outputBNKVersion != 2)
+		{
+			ultimateFileHeader.v3.offset = 0;
+			ultimateFileHeader.v3.version_ = outputBNKVersion;
+			ultimateFileHeader.v3.filesAreCompressed = false;
+			ultimateFileHeader.v3.compressedHeaderSize = 0;
+			ultimateFileHeader.v3.uncompressedHeaderSize = 0;
+		}
+		else
+		{
+			ultimateFileHeader.v2.offset = BNK.FileHeaderV2.fileData.offsetof;
+			ultimateFileHeader.v2.version_ = 2;
+			ultimateFileHeader.v2.filesAreCompressed = false;
+			ultimateFileHeader.v2.padding = 0;
+		}
 
 		state.extendedReturnChannel.v0.packedState |= state.extendedReturnChannel.v0.packedState.Flags.bnkCompressionStatusIsKnown;
 		state.extendedReturnChannel.v0.packedState &= ~state.extendedReturnChannel.v0.packedState.Flags.bnkIsCompressed;
@@ -2056,6 +2177,23 @@ skippingEntryDuringFirstPass:
 		state.extendedReturnChannel.v0.packedState |= (
 			outputtingCompressedBNKFile ? state.extendedReturnChannel.v0.packedState.Flags.bnkIsCompressed : 0
 		);
+	}
+
+	if (outputBNKVersion != 2)
+	{
+		fileTableBufferIndex = 1;
+		fileDataBufferIndex = 2;
+
+		filePaddingLength = 2;
+		filePaddingMask = 1;
+	}
+	else
+	{
+		fileTableBufferIndex = 2;
+		fileDataBufferIndex = 1;
+
+		filePaddingLength = 8;
+		filePaddingMask = 7;
 	}
 
 	backSlashVector = '\\';
@@ -2293,17 +2431,41 @@ nextCentralDirectorySecondPass:
 			mixin(reportProgress!(q{copyingFile}, q{&nameSlice}, q{uncompressedSizeOfFile}));
 
 			/+ The file is uncompressed, we can simply copy it as is. +/
-			initialFileDataOffset = (uint(BNK.FileHeader.sizeof) + totalCompressedFileTableSize).alignUpTo(32 << 10);
 
-			if (cast(uint) uncompressedSizeOfFile > uint.max - bytesUsedByFileData - initialFileDataOffset)
+			uint trailingPaddingInBNKFile = (
+				  outputBNKVersion != 2
+				? 0
+				: (
+					  (filePaddingLength - (uncompressedSizeOfFile & filePaddingMask))
+					& (remainingfileEntriesOfCentralDirectory != 1 ? filePaddingMask : 0)
+				)
+			);
+
+			uint bytesLeftForFile = void;
+
+			if (outputBNKVersion != 2)
+			{
+				initialFileDataOffset = (uint(BNK.FileHeaderV3.sizeof) + totalCompressedFileTableSize).alignUpTo(32 << 10);
+				bytesLeftForFile = uint.max - bytesUsedByFileData - initialFileDataOffset;
+			}
+			else
+			{
+				initialFileDataOffset = (uint(BNK.FileHeaderV2.sizeof) + bytesUsedByFileData).alignUpTo(64);
+				bytesLeftForFile = uint.max - totalCompressedFileTableSize - initialFileDataOffset;
+			}
+
+			if ((bytesLeftForFile < trailingPaddingInBNKFile) | (cast(uint) uncompressedSizeOfFile > bytesLeftForFile))
 			{
 				mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.zipFileIsTooBigForBNKFile)});
 				goto failedWithZlibStreams;
 			}
 
-			bytesUsedByFileData += uncompressedSizeOfFile;
+			bytesUsedByFileData += uncompressedSizeOfFile + trailingPaddingInBNKFile;
 
-			mixin(flushSplitOutput!(q{2}, q{uncompressedSizeOfFile}, q{localFileData}, q{failedWithZlibStreams}));
+			mixin(flushSplitOutput!(q{fileDataBufferIndex}, q{uncompressedSizeOfFile}, q{localFileData}, q{failedWithZlibStreams}));
+
+			ulong padding = 0;
+			mixin(flushSplitOutput!(q{fileDataBufferIndex}, q{trailingPaddingInBNKFile}, q{cast(const(ubyte)*) &padding}, q{failedWithZlibStreams}));
 
 			uncompressedFileTableEntrySize = BNK.UncompressedFileTableEntry.sizeof;
 
@@ -2317,7 +2479,7 @@ nextCentralDirectorySecondPass:
 			fileTableEntryValues[0] = accumulatedCompressedFileOffset;
 			fileTableEntryValues[1] = cast(uint) uncompressedSizeOfFile;
 
-			accumulatedCompressedFileOffset += cast(uint) uncompressedSizeOfFile;
+			accumulatedCompressedFileOffset += cast(uint) uncompressedSizeOfFile + trailingPaddingInBNKFile;
 
 			mixin(compressAndFlushFileTableData!(q{fileTableEntryValues.sizeof}, q{cast(const(ubyte)*) fileTableEntryValues.ptr}));
 
@@ -2336,11 +2498,20 @@ nextCentralDirectorySecondPass:
 
 				uint sizeInBNKFile = 7;
 
-				initialFileDataOffset = (uint(BNK.FileHeader.sizeof) + totalCompressedFileTableSize).alignUpTo(32 << 10);
+				uint spaceLeftForFileData = void;
 
-				uint spaceLeftForFileData = uint.max - bytesUsedByFileData - initialFileDataOffset;
+				if (outputBNKVersion != 2)
+				{
+					initialFileDataOffset = (uint(BNK.FileHeaderV3.sizeof) + totalCompressedFileTableSize).alignUpTo(32 << 10);
+					spaceLeftForFileData = uint.max - bytesUsedByFileData - initialFileDataOffset;
+				}
+				else
+				{
+					initialFileDataOffset = (uint(BNK.FileHeaderV2.sizeof) + bytesUsedByFileData).alignUpTo(64);
+					spaceLeftForFileData = uint.max - totalCompressedFileTableSize - initialFileDataOffset;
+				}
 
-				if ((spaceLeftForFileData == 0) | (sizeInBNKFile > spaceLeftForFileData - trailingPaddingInBNKFile))
+				if ((spaceLeftForFileData < trailingPaddingInBNKFile) | (sizeInBNKFile > spaceLeftForFileData - trailingPaddingInBNKFile))
 				{
 					mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.zipFileIsTooBigForBNKFile)});
 					goto failedWithZlibStreams;
@@ -2352,7 +2523,7 @@ nextCentralDirectorySecondPass:
 				   and lastly a padding byte, if needed, to maintain an alignment of 2. +/
 				ubyte[8] emptyStream = [0x78, 0xDA, 0x01, 0x00, 0x00, 0xFF, 0xFF, 0x00];
 
-				mixin(flushSplitOutput!(q{2}, q{sizeInBNKFile + trailingPaddingInBNKFile}, q{emptyStream.ptr}, q{failedWithZlibStreams}));
+				mixin(flushSplitOutput!(q{fileDataBufferIndex}, q{sizeInBNKFile + trailingPaddingInBNKFile}, q{emptyStream.ptr}, q{failedWithZlibStreams}));
 
 				uncompressedFileTableEntrySize = BNK.CompressedFileTableEntry.sizeof;
 
@@ -2503,13 +2674,25 @@ nextCentralDirectorySecondPass:
 
 					overallUncompressedLength += uncompressedLength;
 
-					uint trailingPaddingInBNKFile = (compressedLength & 1) & (remainingfileEntriesOfCentralDirectory != 1);
+					uint trailingPaddingInBNKFile = (
+						  (filePaddingLength - (compressedLength & filePaddingMask))
+						& (remainingfileEntriesOfCentralDirectory != 1 ? filePaddingMask : 0)
+					);
 
-					initialFileDataOffset = (uint(BNK.FileHeader.sizeof) + totalCompressedFileTableSize).alignUpTo(32 << 10);
+					uint spaceLeftForFileData = void;
 
-					uint spaceLeftForFileData = uint.max - bytesUsedByFileData - initialFileDataOffset;
+					if (outputBNKVersion != 2)
+					{
+						initialFileDataOffset = (uint(BNK.FileHeaderV3.sizeof) + totalCompressedFileTableSize).alignUpTo(32 << 10);
+						spaceLeftForFileData = uint.max - bytesUsedByFileData - initialFileDataOffset;
+					}
+					else
+					{
+						initialFileDataOffset = (uint(BNK.FileHeaderV2.sizeof) + bytesUsedByFileData).alignUpTo(64);
+						spaceLeftForFileData = uint.max - totalCompressedFileTableSize - initialFileDataOffset;
+					}
 
-					if ((spaceLeftForFileData == 0) | (compressedLength > spaceLeftForFileData - trailingPaddingInBNKFile))
+					if ((spaceLeftForFileData < trailingPaddingInBNKFile) | (compressedLength > spaceLeftForFileData - trailingPaddingInBNKFile))
 					{
 						mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.zipFileIsTooBigForBNKFile)});
 						goto failedWithZlibStreams;
@@ -2517,10 +2700,10 @@ nextCentralDirectorySecondPass:
 
 					bytesUsedByFileData += compressedLength + trailingPaddingInBNKFile;
 
-					mixin(flushSplitOutput!(q{2}, q{compressedLength}, q{compressionBuffer}, q{failedWithZlibStreams}));
+					mixin(flushSplitOutput!(q{fileDataBufferIndex}, q{compressedLength}, q{compressionBuffer}, q{failedWithZlibStreams}));
 
-					ubyte padding = 0;
-					mixin(flushSplitOutput!(q{2}, q{trailingPaddingInBNKFile}, q{&padding}, q{failedWithZlibStreams}));
+					ulong padding = 0;
+					mixin(flushSplitOutput!(q{fileDataBufferIndex}, q{trailingPaddingInBNKFile}, q{cast(const(ubyte)*) &padding}, q{failedWithZlibStreams}));
 
 					uncompressedFileTableEntrySize = (
 						cast(uint) BNK.CompressedFileTableEntry.sizeof + (uncompressedChunkSizesOffset << 2)
@@ -2570,11 +2753,20 @@ nextCentralDirectorySecondPass:
 
 						overallUncompressedLength += uncompressedLength;
 
-						initialFileDataOffset = (uint(BNK.FileHeader.sizeof) + totalCompressedFileTableSize).alignUpTo(32 << 10);
+						uint spaceLeftForFileData = void;
 
-						uint spaceLeftForFileData = uint.max - bytesUsedByFileData - initialFileDataOffset;
+						if (outputBNKVersion != 2)
+						{
+							initialFileDataOffset = (uint(BNK.FileHeaderV3.sizeof) + totalCompressedFileTableSize).alignUpTo(32 << 10);
+							spaceLeftForFileData = uint.max - bytesUsedByFileData - initialFileDataOffset;
+						}
+						else
+						{
+							initialFileDataOffset = (uint(BNK.FileHeaderV2.sizeof) + bytesUsedByFileData).alignUpTo(64);
+							spaceLeftForFileData = uint.max - totalCompressedFileTableSize - initialFileDataOffset;
+						}
 
-						if ((spaceLeftForFileData == 0) | (completeChunkSize > spaceLeftForFileData))
+						if (completeChunkSize > spaceLeftForFileData)
 						{
 							mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.zipFileIsTooBigForBNKFile)});
 							goto failedWithZlibStreams;
@@ -2582,7 +2774,7 @@ nextCentralDirectorySecondPass:
 
 						bytesUsedByFileData += completeChunkSize;
 
-						mixin(flushSplitOutput!(q{2}, q{completeChunkSize}, q{compressionBuffer}, q{failedWithZlibStreams}));
+						mixin(flushSplitOutput!(q{fileDataBufferIndex}, q{completeChunkSize}, q{compressionBuffer}, q{failedWithZlibStreams}));
 
 						overallCompressedLength += completeChunkSize;
 
@@ -2780,7 +2972,7 @@ handledZipEntry:
 
 		totalCompressedFileTableSize += deflatedSize;
 
-		if (initialUncompressedFileTableChunkSize == -1)
+		if ((outputBNKVersion != 2) & (initialUncompressedFileTableChunkSize == -1))
 		{
 			initialUncompressedFileTableChunkSize = uncompressedFileTableOffset;
 			initialCompressedFileTableChunkSize = deflatedSize;
@@ -2795,7 +2987,7 @@ handledZipEntry:
 
 			mixin(
 				flushSplitOutput!(
-					q{1},
+					q{fileTableBufferIndex},
 					q{continuationHeader.sizeof},
 					q{cast(const(ubyte)*) &continuationHeader},
 					q{failedWithZlibStreams}
@@ -2805,58 +2997,95 @@ handledZipEntry:
 
 		state.zlib.deflateEnd(&fileTableZLibStream);
 
-		mixin(flushSplitOutput!(q{1}, q{deflatedSize}, q{compressedFileTableBuffer}, q{failedWithOutputBuffer}));
+		mixin(flushSplitOutput!(q{fileTableBufferIndex}, q{deflatedSize}, q{compressedFileTableBuffer}, q{failedWithOutputBuffer}));
 	}
 
-	/+ We terminate the file-table. +/
-	terminalContinuationHeader.compressedSize = 0;
-	terminalContinuationHeader.uncompressedSize = 0;
-
-	totalCompressedFileTableSize += BNK.FileTableContinuationHeader.sizeof;
-
-	mixin(
-		flushSplitOutput!(
-			q{1},
-			q{terminalContinuationHeader.sizeof},
-			q{cast(const(ubyte)*) &terminalContinuationHeader},
-			q{failedWithZlibStreams}
-		)
-	);
-
-	if (BNK.FileHeader.sizeof > uint.max - totalCompressedFileTableSize)
+	if (outputBNKVersion != 2)
 	{
-		mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.tooMuchFileNameInZip)});
-		goto failedWithOutputBuffer;
+		/+ We terminate the file-table. +/
+		terminalContinuationHeader.compressedSize = 0;
+		terminalContinuationHeader.uncompressedSize = 0;
+
+		totalCompressedFileTableSize += BNK.FileTableContinuationHeader.sizeof;
+
+		mixin(
+			flushSplitOutput!(
+				q{fileTableBufferIndex},
+				q{terminalContinuationHeader.sizeof},
+				q{cast(const(ubyte)*) &terminalContinuationHeader},
+				q{failedWithZlibStreams}
+			)
+		);
+
+		if (BNK.FileHeaderV3.sizeof > uint.max - totalCompressedFileTableSize)
+		{
+			mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.tooMuchFileNameInZip)});
+			goto failedWithOutputBuffer;
+		}
+	}
+	else
+	{
+		if (BNK.FileHeaderV2.sizeof > uint.max - totalCompressedFileTableSize)
+		{
+			mixin(fail!q{BNKF2Status.status(BNKF2StatusCode.tooMuchFileNameInZip)});
+			goto failedWithOutputBuffer;
+		}
 	}
 
-	initialFileDataOffset = (uint(BNK.FileHeader.sizeof) + totalCompressedFileTableSize).alignUpTo(32 << 10);
-	paddingNeededBeforeData = initialFileDataOffset - (uint(BNK.FileHeader.sizeof) + totalCompressedFileTableSize);
+	if (outputBNKVersion != 2)
+	{
+		initialFileDataOffset = (uint(BNK.FileHeaderV3.sizeof) + totalCompressedFileTableSize).alignUpTo(32 << 10);
+		paddingNeededBeforeData = initialFileDataOffset - (uint(BNK.FileHeaderV3.sizeof) + totalCompressedFileTableSize);
 
-	assert(paddingNeededBeforeData < (32 << 10));
-	static assert(minimumPageSize <= (32 << 10));
+		assert(paddingNeededBeforeData < (32 << 10));
+		static assert(minimumPageSize <= (32 << 10));
 
-	zeroOut(uncompressedFileTableBuffer.alignUpTo(minimumPageSize), paddingNeededBeforeData.alignUpTo(64));
-	mixin(
-		flushSplitOutput!(
-			q{1},
-			q{paddingNeededBeforeData},
-			q{uncompressedFileTableBuffer.alignUpTo(minimumPageSize)},
-			q{failedWithOutputBuffer}
-		)
-	);
+		zeroOut(uncompressedFileTableBuffer.alignUpTo(minimumPageSize), paddingNeededBeforeData.alignUpTo(64));
+		mixin(
+			flushSplitOutput!(
+				q{fileTableBufferIndex},
+				q{paddingNeededBeforeData},
+				q{uncompressedFileTableBuffer.alignUpTo(minimumPageSize)},
+				q{failedWithZlibStreams}
+			)
+		);
 
-	ultimateFileHeader.dataOffset = initialFileDataOffset;
-	ultimateFileHeader.version_ = 3;
-	ultimateFileHeader.filesAreCompressed = outputtingCompressedBNKFile;
-	ultimateFileHeader.compressedHeaderSize = initialCompressedFileTableChunkSize;
-	ultimateFileHeader.uncompressedHeaderSize = initialUncompressedFileTableChunkSize;
+		ultimateFileHeader.v3.offset = initialFileDataOffset;
+		ultimateFileHeader.v3.version_ = outputBNKVersion;
+		ultimateFileHeader.v3.filesAreCompressed = outputtingCompressedBNKFile;
+		ultimateFileHeader.v3.compressedHeaderSize = initialCompressedFileTableChunkSize;
+		ultimateFileHeader.v3.uncompressedHeaderSize = initialUncompressedFileTableChunkSize;
+	}
+	else
+	{
+		uint endOfFileData = uint(BNK.FileHeaderV2.sizeof) + bytesUsedByFileData;
+		uint fileTableOffset = endOfFileData.alignUpTo(64);
+		uint paddingNeededBeforeFileTable = fileTableOffset - endOfFileData;
+
+		assert(paddingNeededBeforeFileTable < 64);
+
+		zeroOut(uncompressedFileTableBuffer.alignUpTo(minimumPageSize), paddingNeededBeforeFileTable.alignUpTo(64));
+		mixin(
+			flushSplitOutput!(
+				q{fileDataBufferIndex},
+				q{paddingNeededBeforeFileTable},
+				q{uncompressedFileTableBuffer.alignUpTo(minimumPageSize)},
+				q{failedWithZlibStreams}
+			)
+		);
+
+		ultimateFileHeader.v2.offset = fileTableOffset;
+		ultimateFileHeader.v2.version_ = 2;
+		ultimateFileHeader.v2.filesAreCompressed = outputtingCompressedBNKFile;
+		ultimateFileHeader.v2.padding = 0;
+	}
 successful:
 	mixin(
 		flushSplitOutput!(
 			q{0},
-			q{ultimateFileHeader.sizeof},
+			q{outputBNKVersion != 2 ? BNK.FileHeaderV3.sizeof : BNK.FileHeaderV2.sizeof},
 			q{cast(const(ubyte)*) &ultimateFileHeader},
-			q{failedWithOutputBuffer}
+			q{failedWithZlibStreams}
 		)
 	);
 
@@ -2874,13 +3103,13 @@ successful:
 
 			if (output[bufferIndex].buffer == null)
 			{
-				return BNKF2Status.caller(cast(uint) flusherStatus);
+				mixin(fail!q{BNKF2Status.caller(cast(uint) flusherStatus)});
+				goto failedWithZlibStreams;
 			}
 		}
 	}
 
 	ultimateStatus = BNKF2Status.status(BNKF2StatusCode.success);
-	goto failedWithOutputBuffer;
 failedWithZlibStreams:
 	if (compressionStateInitialised)
 	{
@@ -2896,22 +3125,24 @@ failedWithZlibStreams:
 failedWithFileTableZlibStream:
 	state.zlib.deflateEnd(&fileTableZLibStream);
 failedWithOutputBuffer:
-	state.memoryAllocators.free(uncompressedFileTableBuffer, mixin(fileTableBuffersSize));
-
 	foreach (bufferIndex; 0 .. outputBufferCount)
 	{
 		flusherStatus = outputFlusher(context, &output[bufferIndex].buffer, output[bufferIndex].buffer, 0, bufferIndex);
 
 		if (flusherStatus != 0)
 		{
-			return BNKF2Status.caller(cast(uint) flusherStatus);
+			mixin(fail!q{BNKF2Status.caller(cast(uint) flusherStatus)});
+			goto failedWithUncompressedFileTableBuffer;
 		}
 	}
 
 	if ((flusherStatus = outputFlusher(context, null, null, (1 << 16) | outputBufferCount, -1)) != 0)
 	{
-		return BNKF2Status.caller(cast(uint) flusherStatus);
+		mixin(fail!q{BNKF2Status.caller(cast(uint) flusherStatus)});
+		goto failedWithUncompressedFileTableBuffer;
 	}
+failedWithUncompressedFileTableBuffer:
+	state.memoryAllocators.free(uncompressedFileTableBuffer, mixin(fileTableBuffersSize));
 
 	return ultimateStatus;
 }
@@ -2924,12 +3155,15 @@ export BNKF2Status bnkf2_bnkIsCompressed (
 	scope bool* bnkIsCompressed
 )
 {
-	if (inputLength < BNK.FileHeader.filesAreCompressed.offsetof + BNK.FileHeader.filesAreCompressed.sizeof)
+	static assert(BNK.FileHeaderV3.filesAreCompressed.offsetof == BNK.FileHeaderV2.filesAreCompressed.offsetof);
+	static assert(BNK.FileHeaderV3.filesAreCompressed.sizeof == BNK.FileHeaderV2.filesAreCompressed.sizeof);
+
+	if (inputLength < BNK.FileHeaderV3.filesAreCompressed.offsetof + BNK.FileHeaderV3.filesAreCompressed.sizeof)
 	{
 		return BNKF2Status.status(BNKF2StatusCode.inputIsTruncated);
 	}
 
-	*bnkIsCompressed = *(inputBuffer + BNK.FileHeader.filesAreCompressed.offsetof) != 0;
+	*bnkIsCompressed = *(inputBuffer + BNK.FileHeaderV3.filesAreCompressed.offsetof) != 0;
 
 	return BNKF2Status.status(BNKF2StatusCode.success);
 }
