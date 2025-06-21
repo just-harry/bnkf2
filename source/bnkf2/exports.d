@@ -229,8 +229,8 @@ export BNKF2Status bnkf2_bnkToZip (
 		mixin(consume!(q{BNK.FileTableContinuationHeader.sizeof}, q{failedWithOutputBuffer}));
 		mixin(consume!(q{bnkDataOffset}, q{failedWithOutputBuffer}));
 		initialContinuationOffset = bnkDataOffset;
-		bnkDataOffset = BNK.FileHeaderV2.fileData.offsetof;
-		bnkDataLength = initialContinuationOffset - bnkDataOffset;
+		bnkDataOffset = 0;
+		bnkDataLength = initialContinuationOffset;
 	}
 
 	continuationOffset = initialContinuationOffset;
@@ -2205,7 +2205,8 @@ maybeWriteOutEmptyishBNKFile:
 	uncompressedFileTableOffset = 0;
 	uncompressedFileTableChunkSize = 0;
 	totalCompressedFileTableSize = 0;
-	accumulatedCompressedFileOffset = 0;
+	/+ For the V2 BNK format, file-offsets are relative to the entire file. +/
+	accumulatedCompressedFileOffset = outputBNKVersion != 2 ? 0 : BNK.FileHeaderV2.fileData.offsetof;
 	bytesUsedByFileData = 0;
 	compressionStateInitialised = false;
 	decompressionStateInitialised = false;
