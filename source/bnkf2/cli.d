@@ -32,7 +32,7 @@ else
 }
 
 
-enum immutable(OSChar)[] versionString = "v0.10.0";
+enum immutable(OSChar)[] versionString = "v0.10.1";
 
 
 static immutable(OSChar[]) commandLineUsage = (
